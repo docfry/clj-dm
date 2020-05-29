@@ -1,3 +1,7 @@
+;200511/af now uses [com.taoensso/timbre "3.4.0"]
+;could be updated to [com.taoensso/timbre "4.10.0"] but set-config! is using one arg instead of two
+; see https://github.com/ptaoussanis/timbre/blob/master/CHANGELOG.md
+
 (ns director-musices.logging
   (:require [director-musices.global :as global]
             [clojure.string :as clj-str]
@@ -5,7 +9,7 @@
             [taoensso.timbre :as log]))
 
 (def text-area (javax.swing.JTextPane.))
-(def log-frame (ssw/frame :title "Director-musices log"
+(def log-frame (ssw/frame :title "Director-musices log"							;log window from menu/af
                           :content (ssw/scrollable text-area)
                           :size [600 :by 400]))
 

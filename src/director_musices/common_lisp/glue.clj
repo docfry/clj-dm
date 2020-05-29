@@ -54,6 +54,7 @@
   (reload-abcl)
   (init-dm))
     
+;af/ main function for evaluating DM functions
 (defn eval-dm [s]
   (init-dm)
   (eval-abcl "(in-package :dm)")
