@@ -1,4 +1,7 @@
 
+# for me/af
+.DS_Store
+
 # for windows project
 lein.bat
 
