@@ -36,6 +36,8 @@
 ;;;061003/af added bank select
 ;;;061018/af added reverb and pan
 ;;;120607/af removed list of fractions to be compatible with clj-dm
+;;;210908/af Improved print out in debug mode. Prints all midi events and all parameters that are used in DM
+;;;210908/af Added some utilites for distinguishing between performance and score input, fixed load-score
 
 
 (in-package "DM")
@@ -43,14 +45,204 @@
 
 ;;internal parameters
 (defvar *midifile-buffer*)          ;; Used by read-octet and peek-octet.
-(defvar *mf-debug-info*)            ;; When set true, some debug info will be printed in the listener
-                                    ;; during program run.
+(defvar *mf-debug-info*)            ;; When set true, some debug info including all midi events will be printed in the listener
+                                    ;; during reading a midi file.
 (setq *mf-debug-info* nil)    
 ;(setq *mf-debug-info* t)    
 
-(defvar *guess-notevalues-p*)            ;; When set true, note values will be estimated
-(setq *guess-notevalues-p* t)    ;; nil better for clj - it doesn't work that well anyway (120607/af)
+(defvar *guess-notevalues-p*)       ;; When set true, note values will be estimated
+(setq *guess-notevalues-p* t)       ;; nil better for clj - it doesn't work that well anyway (120607/af)
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;  --- Performance alignment of monophonic music ---
+;;  --- read a midi performance and add the performance parameters (DR, SL, DRO) to the corresponding dm score  ---
+;;
+;; 210908/af started
+;; 211004 Working with the monophonic midifiles within the classical accent project
+;; small errors that are taken care of:
+;;   wrong pitch but same number of notes - perf var is transferred but pitch corrected
+;;   one note missing (in perf)
+;;   one note extra (in perf) - dr and dro added to previous note
+;; each error is marked in the resulting score
+
+;top level with file dialogs
+(defun load-midifile-perf-align-to-score ()
+  (let ((mf-fpath (show-dialog-for-opening-files-PD "Load MIDI file performance"
+            :directory (get-dm-var 'music-directory)
+            :extensions '(("MIDI files" . "*.mid")("All files" . "*.*")) ))
+        (mus-fpath (show-dialog-for-opening-files-PD "Load Score (mus format)"
+            :directory (get-dm-var 'music-directory)
+            :extensions '(("DM score files" . "*.mus")("All files" . "*.*")) )))
+    (when (and mf-fpath mus-fpath) (load-midifile-perf-align-to-score-fpath mf-fpath mus-fpath))
+       ))
+  
+
+; monophonic alignment
+; input a midi file performance and the corresponding score in mus format
+
+;new version also updating durations of rests
+;added also wrong pitch before rest or last, last rest in score but not in perf
+
+;new version with new heuristics: checking previous or next note disregarding rests.
+;just wrong pitch fixed
+;220610 Added check in the end for remaining SL=0
+(defun load-midifile-perf-align-to-score-fpath (mf-fpath mus-fpath)
+  (let ((mf-perf nil))
+    (set-midi-performance-input)    ;set preset parameters for midi input
+    (load-midifile-fpath mf-fpath)  ;choose midifile
+    (setq mf-perf *active-score*)
+    (load-score-fpath mus-fpath)    ;choose mus file
+    (merge-all-ties-and-rests)      ;defined in initconvert.lsp (from optimize-accent..-3), note that it is a destructve operation
+    (let ((mfsegl (segment-list (car (track-list mf-perf))))         ;a list of all segments in the first track, ie monophonic
+          (mflen (length (segment-list (car (track-list mf-perf))))) ;total length of midi seg list
+          (mfi 0)        ;note index in midifile
+          ) 
+      (block end-of-mf
+        (each-note
+          (if (this 'bar) (print-ll "bar = " (this 'bar)))
+          ;exit if last note is a rest in score that is missing in midi
+          (when (and (last?) (this 'rest) (>= mfi mflen)) (print-ll "last note a rest in score, not in midi") (set-this :align :no-final-rest-in-midi) (return-from end-of-mf nil))
+          ;exit if beyond last in midi seg list
+          (when (>= mfi mflen) (print-ll "end of midi track") (set-this :align :end-of-midi) (return-from end-of-mf nil))
+
+        ;update rests
+          (cond 
+           ((and (this 'rest) (get-var (nth mfi mfsegl) 'rest)) ;rests in both
+            (set-this 'dr (get-var (nth mfi mfsegl) 'dr))
+            (incf mfi) )
+
+           ((and (this 'rest) (not (get-var (nth mfi mfsegl) 'rest))) ;only rest in score
+            (print-ll "Rest in score but not in midi")
+            (set-this :align :missing-rest)   )
+
+           (t ;all other cases, ie not rest in score
+
+            ;skip first rest in midi but not in score
+            (when (and (first?) (not (this 'rest)) (get-var (nth mfi mfsegl) 'rest))
+              (print-ll "Skipping first rest in midi")
+              (set-this :align :skipping-first-rest-in-midi)
+              (incf mfi) )
+
+          ;skip rest inside midi file (should not happen if everything works)
+            (when (and (not (first?)) (get-var (nth mfi mfsegl) 'rest))
+              (print-ll "skipping rest in midi track")
+              (set-this :align :skipping-rest-in-midi)
+              (incf mfi)                          ;skip rest in perf
+              (when (>= mfi mflen) (print-ll "end of midi track") (set-this :align :end-of-midi) (return-from end-of-mf nil)) )   ;exit if last
+           ;some debug prints
+           ;(print-ll "mf_i= " mfi " score_i= " *i* "  mf_f0= " (get-var (nth mfi mfsegl) 'f0) " score_f0= " (this-f0) "  mf_n= " (get-var (nth mfi mfsegl) 'n) " score_n= " (this 'n))
+
+          ;check all cases
+            (cond
+            ;check if right note or chord containing the right note
+             ((or (and (listp (get-var (nth mfi mfsegl) 'f0)) ;chord?
+                       (or (= (car (get-var (nth mfi mfsegl) 'f0)) (this-f0))  ;check if any of the two first notes in the chord is the right note
+                           (= (cadr (get-var (nth mfi mfsegl) 'f0)) (this-f0)) ))
+                  (= (get-var (nth mfi mfsegl) 'f0) (this-f0)) ) ;perfect match
+              (progn
+                (set-this 'sl (get-var (nth mfi mfsegl) 'sl))
+                (set-this 'dr (get-var (nth mfi mfsegl) 'dr)) ;set dr for the corresponding notes
+                (when (listp (get-var (nth mfi mfsegl) 'f0)) ;when f0 is a list write to score
+                  (print-ll "Simultaneous notes, one match")
+                  (set-this :align :sim-notes-one-match) ) ;write in score
+              ;check for articulation rest in mf (and not in score)
+                (if (and (not (last?))                        
+                         (not (next 'rest))
+                         (not (>= (1+ mfi) mflen)) ;not last in mf list
+                         (get-var (nth (1+ mfi) mfsegl) 'rest) )
+                    (progn
+                      (add-this 'dr (get-var (nth (1+ mfi) mfsegl) 'dr))  ;add the rest dr
+                      (set-this 'dro (get-var (nth (1+ mfi) mfsegl) 'dr)) ;put as articulation
+                      (incf mfi) ; step one more
+                      ))
+                (incf mfi) ))
+
+             ;check if it is a chord but wrong pitches - (need to be sorted out for the following tests)
+             ((listp (get-var (nth mfi mfsegl) 'f0))
+              (progn 
+                (print-ll "Simultaneous notes, NO match")
+                (set-this :align :sim-notes-no-match)  ;write in score
+                (incf mfi) )) ;go to next and hope for the best
+            
+             ;wrong pitch but next ones match, rest/no rest in perf or score
+             ((and (i?next-note *i*) 
+                   (i?next-note-in-seglist mfi mfsegl)
+                   (= (get-var (nth (i?next-note-in-seglist mfi mfsegl) mfsegl) 'f0) 
+                      (iget (i?next-note *i*) 'f0) ))
+              (progn
+                (set-this 'sl (get-var (nth mfi mfsegl) 'sl))
+                (set-this 'dr (get-var (nth mfi mfsegl) 'dr)) ;set dr for the corresponding notes
+                (print-ll "One wrong pitch, next notes match")
+                (set-this :align :wrong-pitch)  ;write in score
+                (set-this :wrong-pitch (get-var (nth mfi mfsegl) 'f0))  ;write in score
+                (when (and (not (next 'rest)) (get-var (nth (1+ mfi) mfsegl) 'rest)) ;when not next rest in score but next rest in midi
+                  (add-this 'dr (get-var (nth (1+ mfi) mfsegl) 'dr)) ;add the rest dr
+                  (set-this 'dro (get-var (nth (1+ mfi) mfsegl) 'dr)) ;put as articulation
+                  (incf mfi) ) ;one extra for the rest in mf
+                (incf mfi) ))
+
+             ;wrong pitch last note or last note before rest. One note before needs to be a match, rest/no rest in perf or score
+             ((and (not (i?next-note *i*)) ;last note or last before rest
+                   (i?prev-note *i*)
+                   (i?prev-note-in-seglist mfi mfsegl)
+                   (= (get-var (nth (i?prev-note-in-seglist mfi mfsegl) mfsegl) 'f0) ;compare the notes
+                      (iget (i?prev-note *i*) 'f0) ))
+
+              (progn
+                (set-this 'sl (get-var (nth mfi mfsegl) 'sl))
+                (set-this 'dr (get-var (nth mfi mfsegl) 'dr)) ;set dr for the corresponding notes
+                (set-this :align :wrong-pitch-last-or-last-before-rest)  ;write in score
+                (set-this :wrong-pitch (get-var (nth mfi mfsegl) 'f0))
+                (print-ll "One wrong pitch last or last before rest, prev note match")
+                (incf mfi)
+                ))
+
+             ;one missing note in perf, rest/no rest in score after
+             ((and (i?next-note *i*)        ;next note exists
+                   (= (get-var (nth mfi mfsegl) 'f0) (iget (i?next-note *i*) 'f0))   ;next note in score match
+                   )
+              (progn ;we just do nothing which means that next *i* increments and mfi stays the same which should result in a hit
+                (set-this :align :missing-note)  ;write in score
+                (print-ll "One missing note, next notes match")
+                ))
+             ;fix also last note
+
+             ;one extra note in perf, rest/no rest
+             ((and (i?next-note-in-seglist mfi mfsegl) ;there is a following note in perf
+                   (= (get-var (nth (i?next-note-in-seglist mfi mfsegl) mfsegl) 'f0) ;next note in perf match
+                      (this-f0) ))
+              (progn
+                (when (i?prev-note *i*) (iadd (i?prev-note *i*) 'dr (get-var (nth mfi mfsegl) 'dr))) ;add the dr of extra note to prev note in score
+                (set-this :align :extra-note-before)  ;write in score
+                (set-this :extra-note-before (get-var (nth mfi mfsegl) 'f0))
+                (when (and (i?prev-note *i*) 
+                           (get-var (nth (1+ mfi) mfsegl) 'rest)) ;next a rest in perf
+                  (iadd (i?prev-note *i*) 'dr (get-var (nth (1+ mfi) mfsegl) 'dr))  ;add dr to prev note
+                  (iset (i?prev-note *i*) 'dro (get-var (nth (1+ mfi) mfsegl) 'dr)) ;set articulation
+                  (incf mfi) ) ;step one for the rest in perf
+                (incf mfi) ;step one note in perf
+                (decf *i*) ;step one note back in score (since next loop will step one forward) (can be two bars indicated if first note in bar)
+                (print-ll "One extra note, next notes match") ))
+             
+             (t ;if not a match was found
+              (progn
+                (set-this 'sl (get-var (nth mfi mfsegl) 'sl)) ;transfer sl and dr anyway
+                (set-this 'dr (get-var (nth mfi mfsegl) 'dr)) 
+                (set-this :align :no)  ;write in score
+                (print-ll "No matching")
+                (incf mfi) )) ;go to next and hope for the best (thus assume that it is a pitch error)
+             ))))))
+    ;check if there are any remaining sl=0 which probably means that the alignment missed that note anyway (should not happen..)
+    ;happened once in Gabriel data, 10 MO.mid last note since there was two missing notes in the end
+    (each-note-if
+      (this 'sl)
+      (= (this 'sl) 0)
+      (not (this :align))
+      (then
+        (set-this :align :sl-zero)
+        (print-ll "SL = 0 for a note without detected alignment error") ))
+    ))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -58,6 +250,7 @@
 ;;  --- load a midifile ---
 ;;
 
+#|
 (defun load-midifile ()                  
   (let ((fpath (show-dialog-for-opening-files-PD "Load MIDI"
                                                  :directory (get-dm-var 'music-directory)
@@ -67,11 +260,37 @@
        (load-midifile-fpath fpath)
        (set-dm-var 'music-directory (directory-namestring fpath))
        (setf (nickname *active-score*) (file-namestring fpath))      
-       (make-or-update-edit-music-window) ;def in musicdialog
-       (redraw-display-windows) ;def in drawProp
-       (redraw-music-windows) ;def in drawPolyNotes
+       ;(make-or-update-edit-music-window) ;def in musicdialog
+       ;(redraw-display-windows) ;def in drawProp
+       ;(redraw-music-windows) ;def in drawPolyNotes
+       ))))
+|#
+
+;Loads a midifile with a dialog window
+;updated to work with lispworks
+(defun load-midifile ()                  
+  (let ((fpath (show-dialog-for-opening-files-PD "Load MIDI"
+            :directory (get-dm-var 'music-directory)
+            :extensions '(("MIDI files" . "*.mid")("All files" . "*.*")) )))
+    (when fpath 
+      (with-waiting-cursor
+       (load-midifile-fpath fpath)
        ))))
 
+;sets all variables for minimum change of the performance
+(defun set-midi-performance-input ()
+  (set-dm-var 'midifile-input-quantize-dr nil)
+  (set-dm-var 'midifile-input-quantize-split-at-barlines nil)
+  (set-dm-var 'midifile-input-articulation-threshold 0)
+  )
+
+;sets all variables assuming score input
+(defun set-midi-score-input ()
+  (set-dm-var 'midifile-input-quantize-dr nil)
+  (set-dm-var 'midifile-input-quantize-split-at-barlines t)
+  (set-dm-var 'midifile-input-articulation-threshold 0.1)
+  )
+       
 #|
 (defun load-midifile-fpath (fpath)
    (let ((midifile (make-instance 'midifile :score-filename fpath)))
@@ -149,7 +368,8 @@
                                   (read-byte ifile nil nil)))
         (setf (division midifile) (+ (ash (read-byte ifile nil nil) 8)
                                      (read-byte ifile nil nil)))
-        (if (get-dm-var 'verbose-i/o) (print-ll "MIDI file type: " (miditype midifile) " tracks: " (ntrks midifile)))
+        (if (or (get-dm-var 'verbose-i/o) *mf-debug-info*)
+            (print-ll "--- MIDI file type: " (miditype midifile) " tracks: " (ntrks midifile) " ---"))
         
         (loop repeat (- chunk-size 6) do (read-byte ifile nil nil))    ;; cutting rest of header chunk
         
@@ -180,6 +400,8 @@
         ))
     (midifile-init)
     (get-track-par)
+    (set-dm-var 'music-directory (directory-namestring fpath))
+    (setf (nickname *active-score*) (file-namestring fpath))      
     (if (get-dm-var 'verbose-i/o) (print-ll  "Active score loaded from " fpath))
     midifile
     ))
@@ -617,15 +839,32 @@
 ;;;      )))
 
 ;;added 'nsl parameter
+#|
 (defun midifile-init-var ()
    (each-segment-if
      (typep *this-segment* 'noteon)
      (then
        (set-this 'f0 (note-number *this-segment*))
-      (set-this 'nsl (vel-to-sl-sblive (velocity *this-segment*))) ;back transformation to dB according to sblive
-      (set-this 'sl (this 'nsl))
+       (set-this 'nsl (vel-to-sl-sblive (velocity *this-segment*))) ;back transformation to dB according to sblive
+       (set-this 'sl (this 'nsl))
+       ;(print-ll "noteon f0=" (note-number *this-segment*) " velocity=" (velocity *this-segment*))
       ;(set-this 'dr (this 'ndr))
        )))
+|#
+
+;211004 added input synth as object (not all synths have the vel-to-sl method)
+(defun midifile-init-var ()
+  (let ((input-synt (make-synth (get-dm-var 'midifile-input-synth-name-default))))
+   (each-segment-if
+     (typep *this-segment* 'noteon)
+     (then
+       (set-this 'f0 (note-number *this-segment*))
+       (set-this 'nsl (vel-to-sl input-synt (velocity *this-segment*))) ;from velocity to dB according default input synth
+       (set-this 'sl (this 'nsl))
+       ;(print-ll "noteon f0=" (note-number *this-segment*) " velocity=" (velocity *this-segment*) " SL=" (vel-to-sl input-synt (velocity *this-segment*)))
+      ;(set-this 'dr (this 'ndr))
+       ))))
+
           
 (defun midifile-collect-chords ()
    (each-segment-if           ;collect chords
@@ -1516,7 +1755,7 @@
             (t    (error "wrong type of MTrk event"))))
      ))
 |#
-
+#|
 ;;added input midi volume
 ;;added pich bend read
 (defun read-MTrk (istream track)
@@ -1534,24 +1773,27 @@
           (case status
             
             ;-------NOTE OFF---------
-            (#x8 (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'noteOff
+            (#x8 (let ((this-seg (make-instance 'noteOff
                                       :delta-time delta-time
                                       :channel (logand x 15)
                                       :note-number (read-octet istream nil nil)
-                                      :velocity (read-octet istream nil nil) ))
-             (incf delta-time (translate-variable-length-quantity istream))
-             (when *mf-debug-info* (format t "~D noteOff" delta-time)) )
+                                      :velocity (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg) 
+                      (incf delta-time (translate-variable-length-quantity istream))
+                      ;(when *mf-debug-info* (format t " ~D noteOff" delta-time))
+                      (when *mf-debug-info* (format t "~%~D noteOff Ch=~D Note=~D Vel=~D" delta-time (channel this-seg)(note-number this-seg)(velocity this-seg) ))))
             
             ;-------NOTE ON---------
-            (#x9 (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'noteOn
+            (#x9 (let ((this-seg (make-instance 'noteOn
                                       :delta-time delta-time
                                       :channel (logand x 15)
                                       :note-number (read-octet istream nil nil)
-                                      :velocity (read-octet istream nil nil)) )   ;; if 0 the noteOff
+                                      :velocity (read-octet istream nil nil) )))   ;; if 0 the noteOff
+                 (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
                  (incf delta-time (translate-variable-length-quantity istream))
-             (when *mf-debug-info* (format t "~%~D noteOn " delta-time)))
+                 ;(when *mf-debug-info* (format t "~%~D noteOn " delta-time))
+                 (when *mf-debug-info* (format t "~%~D noteOn Ch=~D Note=~D Vel=~D" delta-time (channel this-seg)(note-number this-seg)(velocity this-seg) )))
+             )
             
             ;-------POLYPHONIC KEY PRESSURE/AFTERTOUCH---------
             (#xA (when *mf-debug-info* (format t "~%not implemented Polyphonic key pressure/Aftertouch!"))
@@ -1564,45 +1806,50 @@
 ;;;             (incf delta-time (translate-variable-length-quantity istream)) )
             (#xB (case (read-octet istream nil nil) ;;read control number
                    (7                                ;volume
-                    (when *mf-debug-info* (format t "~%~D midiVolume " delta-time))
-                    (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'midiVolume
+                    (let ((this-seg (make-instance 'midiVolume
                                       :delta-time delta-time
                                       :channel (logand x 15)
-                                    :volume (read-octet istream nil nil) )))
+                                      :volume (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiVolume Ch=~D Vol=~D" delta-time (channel this-seg)(volume this-seg) ))))
                    (0                                ;bank MSB
-                    (when *mf-debug-info* (format t "~%~D midiBankMSB " delta-time))
-                    (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'midiBankMSB
+                    ;(when *mf-debug-info* (format t "~%~D midiBankMSB " delta-time))
+                    (let ((this-seg (make-instance 'midiBankMSB
                                       :delta-time delta-time
                                       :channel (logand x 15)
-                                    :msb (read-octet istream nil nil) )))
+                                      :msb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiBankMSB Ch=~D msb=~D" delta-time (channel this-seg)(msb this-seg) ))))
                    (32                                ;bank LSB
-                    (when *mf-debug-info* (format t "~%~D midiBankLSB " delta-time))
-                    (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'midiBankLSB
+                    ;(when *mf-debug-info* (format t "~%~D midiBankLSB " delta-time))
+                    (let ((this-seg (make-instance 'midiBankLSB
                                       :delta-time delta-time
                                       :channel (logand x 15)
                                     :lsb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiBankLSB Ch=~D lsb=~D" delta-time (channel this-seg)(lsb this-seg) ))))
                    (10                                ;Pan
-                    (when *mf-debug-info* (format t "~%~D midiPan " delta-time))
-                    (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'midiPan
+                    ;(when *mf-debug-info* (format t "~%~D midiPan " delta-time))
+                    (let ((this-seg (make-instance 'midiPan
                                       :delta-time delta-time
                                       :channel (logand x 15)
                                     :pan (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiPan Ch=~D Pan=~D" delta-time (channel this-seg)(pan this-seg) ))))
                    (91                                ;Reverb
-                    (when *mf-debug-info* (format t "~%~D midiReverb " delta-time))
-                    (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
-                                  (make-instance 'midiReverb
+                    ;(when *mf-debug-info* (format t "~%~D midiReverb " delta-time))
+                    (let ((this-seg  (make-instance 'midiReverb
                                       :delta-time delta-time
                                       :channel (logand x 15)
                                     :reverb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiReverb Ch=~D Rev=~D" delta-time (channel this-seg)(reverb this-seg) ))))
                    (t                
                     (when *mf-debug-info* (format t "~%not implemented Select Channel Mode or Control Change!"))
                     (read-octet istream nil nil) ))
              (incf delta-time (translate-variable-length-quantity istream)) )
             
+            ;;HIT (210906)
             ;-------PROGRAM CHANGE---------
             (#xC (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*)))
                                   (make-instance 'programChange
@@ -1723,5 +1970,225 @@
                    (t    (error "wrong type of MTrk event"))))
             (t    (error "wrong type of MTrk event"))))
      ))
+|#
 
+;210907/af new version with better printout when *mf-debug-info* is activated
+(defun read-MTrk (istream track)
+  (declare (stream istream))
+  ;(print track)
+  (let ((delta-time 0) (midi-list '()) (ready nil) (status 0) (x 0))
+    (declare (integer delta-time status x) (list midi-list))
+    (setq *midifile-buffer* nil)                                                 ;; reset input buffer
+    (setq delta-time (translate-variable-length-quantity istream)) ;read first deltatime
+    (loop until ready do
+          (when (logbitp 7 (peek-octet istream))              ;; new status - not running status
+            (setq x (read-octet istream nil nil) status (ash x -4)))
+          (case status
+            
+            ;-------NOTE OFF---------
+            (#x8 (let ((this-seg (make-instance 'noteOff
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :note-number (read-octet istream nil nil)
+                                      :velocity (read-octet istream nil nil) )))
+                   (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg) 
+                   (when *mf-debug-info* (format t "~%~D noteOff Ch=~D Note=~D Vel=~D" delta-time (channel this-seg)(note-number this-seg)(velocity this-seg) ))
+                   (incf delta-time (translate-variable-length-quantity istream))
+                   ))
+            
+            ;-------NOTE ON---------
+            (#x9 (let ((this-seg (make-instance 'noteOn
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :note-number (read-octet istream nil nil)
+                                      :velocity (read-octet istream nil nil) )))   ;; if 0 the noteOff
+                   (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                   (when *mf-debug-info* (format t "~%~D noteOn Ch=~D Note=~D Vel=~D" delta-time (channel this-seg)(note-number this-seg)(velocity this-seg) ))
+                   (incf delta-time (translate-variable-length-quantity istream))
+                   ))
+            
+            ;-------POLYPHONIC KEY PRESSURE/AFTERTOUCH---------
+            (#xA (when *mf-debug-info* (format t "~%~D not implemented Polyphonic key pressure/Aftertouch!" delta-time))
+             (loop repeat 2 do (read-octet istream nil nil))
+             (incf delta-time (translate-variable-length-quantity istream)) )
+            
+            ;-------SELECT CHANNEL MODE OR CONTROL CHANGE---------
+;;;            (#xB (when *mf-debug-info* (format t "~%not implemented Select Channel Mode or Control Change!") )
+;;;             (loop repeat 2 do (read-octet istream nil nil))
+;;;             (incf delta-time (translate-variable-length-quantity istream)) )
+            (#xB (case (read-octet istream nil nil) ;;read control number
+                   (7                                ;volume
+                    (let ((this-seg (make-instance 'midiVolume
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :volume (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiVolume Ch=~D Vol=~D" delta-time (channel this-seg)(volume this-seg) ))))
+                   (0                                ;bank MSB
+                    (let ((this-seg (make-instance 'midiBankMSB
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :msb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiBankMSB Ch=~D msb=~D" delta-time (channel this-seg)(msb this-seg) ))))
+                   (32                                ;bank LSB
+                    (let ((this-seg (make-instance 'midiBankLSB
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :lsb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiBankLSB Ch=~D lsb=~D" delta-time (channel this-seg)(lsb this-seg) ))))
+                   (10                                ;Pan
+                    (let ((this-seg (make-instance 'midiPan
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :pan (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiPan Ch=~D Pan=~D" delta-time (channel this-seg)(pan this-seg) ))))
+                   (91                                ;Reverb
+                    (let ((this-seg  (make-instance 'midiReverb
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :reverb (read-octet istream nil nil) )))
+                      (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                      (when *mf-debug-info* (format t "~%~D midiReverb Ch=~D Rev=~D" delta-time (channel this-seg)(reverb this-seg) ))))
+                   (t                
+                    (when *mf-debug-info* (format t "~%~D not implemented Select Channel Mode or Control Change!" delta-time))
+                    (read-octet istream nil nil) ))
+                 (incf delta-time (translate-variable-length-quantity istream)) )
+            
+            ;-------PROGRAM CHANGE---------
+            (#xC (let ((this-seg (make-instance 'programChange
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :program (1+ (read-octet istream nil nil)) )))
+                       (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+                       (when *mf-debug-info* (format t "~%~D programChange Ch=~D Pr=~D" delta-time (channel this-seg)(program this-seg) ))
+                       (incf delta-time (translate-variable-length-quantity istream))
+                       ))
+            
+            ;-------CHANNEL PRESSURE---------
+            (#xD (when *mf-debug-info* (format t "~%~D not implemented Channel Pressure!" delta-time) )
+             (read-octet istream nil nil)
+             (incf delta-time (translate-variable-length-quantity istream)) )
+            
+            ;-------PITCH BEND---------
+            (#xE 
+             (let ((this-seg (make-instance 'pitchBend
+                                      :delta-time delta-time
+                                      :channel (logand x 15)
+                                      :pitchbend (- (+ (read-octet istream nil nil) (* 128 (read-octet istream nil nil))) 8192) )))
+               (add-one-segment (if track track (nth (logand x 15) (track-list *active-score*))) this-seg)
+               (when *mf-debug-info* (format t "~%~D pitchBend Ch=~D Pi=~D" delta-time (channel this-seg) (pitchbend this-seg) ))
+               (incf delta-time (translate-variable-length-quantity istream) )))
+            
+            ;-------SYSTEM EXCLUSIVE AND META EVENTS----------
+            (#xF (case x
+                   (#xF0 
+                     (let ((length (translate-variable-length-quantity istream)) 
+                          (l '()))
+                       (loop repeat length do (newr l (read-octet istream nil nil)))
+                       ;(add-one-segment track (make-instance 'sysex-event :delta-time delta-time :sysex l ))
+                       (setf (sysex-list *active-score*) (append (sysex-list *active-score*) (list l)))  ;write direct in score object all sysex in a list of lists             
+                       (when *mf-debug-info* (format t "~%~D system exclusive " delta-time)) )
+                     (incf delta-time (translate-variable-length-quantity istream)) )
+
+                   (#xF7 (when *mf-debug-info* (format t "~%~D not implemented System Exclusive \"escape\"!" delta-time))
+                         (let ((length (translate-variable-length-quantity istream)))
+                           (loop repeat length do (read-octet istream nil nil)))
+                         (incf delta-time (translate-variable-length-quantity istream)) )
+            
+                   ;-------META EVENTS---------;for type 0: set all meta in tempo track
+
+                   (#xFF (let ((meta-type (read-octet istream nil nil))
+                               (meta-length (translate-variable-length-quantity istream)))
+                           (declare (integer meta-length meta-type))
+                           ;(when *mf-debug-info* (format t "~%META-EVENT type: ~X length: ~D" meta-type meta-length))
+                           (case meta-type
+                             (#x00 
+                              (when *mf-debug-info* (format t "~%~D Meta-event, not implemented Sequence Number!" delta-time))
+                              (loop repeat meta-length do (read-octet istream nil nil))
+                              (incf delta-time (translate-variable-length-quantity istream)) )
+
+			     ;-------copyright notice---------
+                             (#x02 ;(when *mf-debug-info* (format t "~%Meta Event copyrightNotice"))
+                                   (let ((this-event (read-string istream meta-length)))
+                                     (setf (copyrightnotice-string *active-score*)  this-event)
+                                     (when *mf-debug-info* (format t "~%~D Meta Event, copyrightNotice = ~S" delta-time this-event))
+                                     (incf delta-time (translate-variable-length-quantity istream)) ))
+
+			     ;-------track name---------
+                             (#x03 
+                              (let ((this-event (read-string istream meta-length)))
+                                (setf (trackname (if track track (nth 16 (track-list *active-score*)))) this-event)
+                                (when *mf-debug-info* (format t "~%~D Meta Event, Track Name = ~S" delta-time this-event))
+                                (incf delta-time (translate-variable-length-quantity istream)) ))
+
+                             ;-------not implemented MIDI Channel Prefix-------
+                             (#x20 (when *mf-debug-info* (format t "~%~D Meta Event, not implemented MIDI Channel Prefix!" delta-time))
+                              (loop repeat meta-length do (read-octet istream nil nil))
+                              (incf delta-time (translate-variable-length-quantity istream)))
+
+                             ;-------end of track---------
+                             (#x2F (when *mf-debug-info* (format t "~%~D Meta Event, endOfTrack" delta-time))
+                              (add-one-segment (if track track (nth 16 (track-list *active-score*)))
+                                               (make-instance 'endOfTrack :delta-time delta-time) )
+                                   (setq ready t)
+                              (loop repeat meta-length do (read-octet istream nil nil)))
+
+                             ;-------set tempo---------
+                             (#x51 
+                              (let ((this-seg (make-instance 'setTempo
+                                                   :delta-time delta-time
+                                                   :midi-tempo  (+ (ash (read-octet istream nil nil) 16)
+                                                                   (ash (read-octet istream nil nil) 8)
+                                                                   (read-octet istream nil nil))) ))
+                                (add-one-segment (if track track (nth 16 (track-list *active-score*))) this-seg)
+                                (loop repeat (- meta-length 3) do (read-octet istream nil nil))
+                                (when *mf-debug-info* (format t "~%~D Meta Event, setTempo = ~D" (delta-time this-seg)(midi-tempo this-seg)))
+                                (incf delta-time (translate-variable-length-quantity istream)) ))
+
+                             ;-------not implemented SMPTE Offset-------
+                             (#x54 (when *mf-debug-info* (format t "~%~D Meta Event, not implemented SMPTE Offset!" delta-time))
+                              (loop repeat meta-length do (read-octet istream nil nil))
+                              (incf delta-time (translate-variable-length-quantity istream)) )
+
+                             ;-------time signature---------
+                             (#x58 (let ((this-seg (make-instance 'timeSignature
+                                                        :delta-time delta-time
+                                                        :nn (read-octet istream nil nil)
+                                                        :dd (read-octet istream nil nil)
+                                                        :cc (read-octet istream nil nil)
+                                                        :bb (read-octet istream nil nil)) ))
+                                     (add-one-segment (if track track (nth 16 (track-list *active-score*))) this-seg)
+                                     (loop repeat (- meta-length 4) do (read-octet istream nil nil))
+                                     (when *mf-debug-info* (format t "~%~D Meta Event, timeSignature nn=~D dd=~D cc=~D bb=~D" 
+                                                                   delta-time (nn this-seg)(dd this-seg)(cc this-seg)(bb this-seg)))
+                                     (incf delta-time (translate-variable-length-quantity istream)) ))
+
+                             ;-------key signature---------
+                             (#x59 (let ((this-seg (make-instance 'keySignature
+                                                        :delta-time delta-time
+                                                        :sf (read-octet istream nil nil)
+                                                        :mi (read-octet istream nil nil)) ))
+                                     (add-one-segment (if track track (nth 16 (track-list *active-score*))) this-seg)
+                                     (loop repeat (- meta-length 2) do (read-octet istream nil nil))
+                                     (when *mf-debug-info* (format t "~%~D Meta Event, keySignature sf=~D mi=~D" delta-time (sf this-seg)(mi this-seg)))
+                                     (incf delta-time (translate-variable-length-quantity istream)) ))
+
+                             ;-------other meta events--------- 
+                             (t    (cond                                 ;; other Meta-Events
+                                    ((and (>= meta-type #x01)
+                                          (<= meta-type #x0F))
+                                     (when *mf-debug-info* (format t "~%~D Meta Event, not implemented Text Event of type ~D!" delta-time meta-type)))
+                                    ((= meta-type #x7F)
+                                     (when *mf-debug-info* (format t "~%~D Meta Event, not implemented Sequencer-Specific Event!" delta-time)))
+                                    (t
+                                     (when *mf-debug-info* 
+                                         (format t "~%~D not implemented Meta-Event of type ~D!" delta-time meta-type))))
+                                (loop repeat meta-length do (read-octet istream nil nil))
+                                (incf delta-time (translate-variable-length-quantity istream)) ))))
+                   (t    (error "wrong type of MTrk event"))))
+            (t    (error "wrong type of MTrk event"))))
+     ))
 

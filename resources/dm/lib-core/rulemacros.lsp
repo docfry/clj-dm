@@ -8,6 +8,9 @@
 ;; 9111 Transfered to CL2
 ;; 9702/AF Completely new version for the new data structure
 ;; 0008/af fixed all set-dr access functions
+;; 170719/af make-group-meta-track: some strange problem with using lispworks
+;;    works only when it is recompiled/evaluated
+
 
 (in-package :dm)
 
@@ -170,6 +173,8 @@
 ;returns a meta-track containing a list of group sub-tracks
 ;begin and end statements are evaluated and the usual access functions are permitted
 ;assuming "this" as the position of the first and last segment, respectively
+;170719/af make-group-meta-track: some strange problem with using lispworks
+;works only when it is recompiled/evaluated
 (defun make-group-meta-track (track &key begin end)
    (let ((meta-track (make-instance 'meta-track :trackname "group meta track"))
          (sub-track (make-instance 'basic-track)) )
@@ -318,7 +323,7 @@
 (defun get-track-var (varname)
  (eval (list varname (nth *i* *v*)) ))
 
- (defun set-track-var (varname value)
+(defun set-track-var (varname value)
  (eval (list 'setf (list varname (nth *i* *v*)) value)) )
 
 (defun remove-this-track ()
@@ -340,6 +345,7 @@
 ;define also 
 ;,  multiply-this
 
+;Possible extension
 ;keywords: only-existing-values-p, offset, output list/mean/sum/first
 ; a version with keywords make the this-dr function unecessary
 
@@ -643,13 +649,13 @@
 
 (defun first? () (= *i* 0))
 
-;;;(defun first+1? ()
-;;;  (if (= *i* 1) t nil) )
 (defun first+1? () (= *i* 1))
+(defun first+2? () (= *i* 2))
+(defun first+3? () (= *i* 3))
 
-;;;(defun last-1? ()
-;;;  (if (= (1- (i?last)) *i*) t nil) )
 (defun last-1? () (= (1- (i?last)) *i*))
+(defun last-2? () (= (- (i?last) 2) *i*))
+(defun last-3? () (= (- (i?last) 3) *i*))
 
 ;returns the number of the note with property prop after note i
 ;if not found ->nil
@@ -713,6 +719,20 @@
            (return-from end i)
            ))))
 
+;the same but for specified segment list (track)
+;can be run outside of rule macro
+;220517 added
+(defun i?next-note-in-seglist (i segl)
+  (untilexit end
+    (incf i)
+    (cond ((>= i (1- (length segl)))
+           (return-from end nil))
+          ((and (get-var (nth i segl) 'n) 
+                (car (get-var (nth i segl) 'n)) 
+                (not (get-var (nth i segl) 'rest)) )
+           (return-from end i)
+           ))))
+
 ;get previous note excluding rests
 ;not found -> nil
 (defun i?prev-note (i)
@@ -721,6 +741,20 @@
     (cond ((< i 0)
            (return-from end nil))
           ((and (iget i 'n) (car (iget i 'n)) (not (iget i 'rest)))
+           (return-from end i)
+           ))))
+
+;the same but for specified segment list (track)
+;can be run outside of rule macro
+;220517 added
+(defun i?prev-note-in-seglist (i segl)
+  (untilexit end
+    (decf i)
+    (cond ((< i 0)
+           (return-from end nil))
+          ((and (get-var (nth i segl) 'n) 
+                (car (get-var (nth i segl) 'n)) 
+                (not (get-var (nth i segl) 'rest)) )
            (return-from end i)
            ))))
 

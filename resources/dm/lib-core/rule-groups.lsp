@@ -10,8 +10,6 @@
 
 (in-package :dm)
 
-
-
 ;  rule-apply-list
 ;  rule-apply-list-barsync
 ;  rule-apply-list-melsync
@@ -23,11 +21,7 @@
 ;  apply-all
 ;  apply-all-melsync))
 
-
-
 ;(defun foo () (rule-apply-list-melsync (get-dm-var 'all-rules1*2)))
-
-
 
 ;; -------------------
 ;;   RULE-APPLY-LIST
@@ -395,6 +389,17 @@
           (normalize-dr)
           )))
     (rule-apply-list-melsync rulelist) ))
+
+;; 220411 test a bug with accents
+(defun apply-all-melsync (quant)
+  (let
+      ((rulelist
+        `(
+          (mark-metrical-accent)
+          (metrical-accent ,quant) 
+          (normalize-sl)
+          (normalize-dr)          )))
+    (apply-rule-list-melodic-sync rulelist) ))
 
 (defvar *batch1*
     '(

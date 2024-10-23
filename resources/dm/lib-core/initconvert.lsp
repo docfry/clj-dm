@@ -10,6 +10,8 @@
 ;;120607/af new notation version with dots and tuples allowed in fraction notation
 ;;121203/af converts at load old note format to new
 ;;120114/af changed score dynamics to nsl
+;;220622 Added get-note-value-fraction-segment (used in new p-each-rule)
+
 
 (in-package :dm)
 
@@ -50,8 +52,8 @@
   (convert-old-note-format)
   (convert-note-value-to-dots)
   ;(convert-chord)
-  (if (get-dm-var 'init-music-include-dynamics)
-     (set-dynamics 1))
+  (if (get-dm-var 'init-music-include-dynamics) (set-dynamics 1))
+  (set-accent 1)
   ;(set-first 'va 0)
   ;(set-first 'dc 0)
   ;(set-first 'vol 0)
@@ -163,6 +165,7 @@
 ;;
 (defun init-music-mf ()
   (each-note
+    ;(print-ll "note " (this 'n) " sl " (this 'sl))
     (cond ((this 'rest))     ;rest
           (t (set-this 'sl 0) ;else
              (set-this 'n (cons (f0-to-toneoctave (this 'f0))
@@ -199,6 +202,24 @@
         (add-this 'sl dsl)
         (add-this 'nsl dsl) )
       )))
+
+;; ----------------
+;;   SET-ACCENT
+;; ----------------
+;;
+;;distance defines the distance between the accent marking in dB
+;;default 2.5 dB per step.
+(defun set-accent (quant)
+  (let ((distance (* 4 quant))) ;dB
+     (each-note-if
+       (this 'accent)
+       (not (this 'rest))
+       (this 'sl) 
+       (this 'nsl)
+       (then
+         (add-this 'sl (* distance (this 'accent)))
+         (add-this 'nsl (* distance (this 'accent)))
+         ))))
 
 ;;
 ;; ----------------------
@@ -309,6 +330,39 @@
             )))
     (if (iget i 'tuple)
         (let ((tuple (iget i 'tuple)))
+          (case tuple
+            (3 (setq notevalue (* notevalue 2/3)))
+            (5 (setq notevalue (* notevalue 4/5)))
+            (t (if (listp tuple)
+                   (setq notevalue (/ (* notevalue (car tuple)) (cdr tuple)))
+                 (error 'get-note-value-fraction "this tuplet not implemented: " tuple) ))
+            )))
+    notevalue ))
+
+; 220622 same but for a segment object instead (used in new p-each-rule)
+(defun get-note-value-fraction-segment (seg)
+  (let ((notevalue nil))
+    
+    (if (listp (cdr (get-var seg 'n)))
+        (setq notevalue (apply #'+ (cdr (get-var seg 'n))))  ;from fraction list notation
+      (setq notevalue (/ 1 (cdr (get-var seg 'n)))) ) ;from old notation
+    
+    (if (get-var seg 'dot)
+        (case (get-var seg 'dot)
+          (1 (setq notevalue (* notevalue 3/2)))
+          (2 (setq notevalue (* notevalue 7/4)))
+          (t (error 'get-note-value-fraction "wrong dot value on note" *i*)) ))
+    (if (get-var seg 't)
+        (let ((tuple (get-var seg 't)))
+          (case tuple
+            (3 (setq notevalue (* notevalue 2/3)))
+            (5 (setq notevalue (* notevalue 4/5)))
+            (t (if (listp tuple)
+                   (setq notevalue (/ (* notevalue (car tuple)) (cdr tuple)))
+                 (error 'get-note-value-fraction "this tuplet not implemented: " tuple) ))
+            )))
+    (if (get-var seg 'tuple)
+        (let ((tuple (get-var seg 'tuple)))
           (case tuple
             (3 (setq notevalue (* notevalue 2/3)))
             (5 (setq notevalue (* notevalue 4/5)))
@@ -454,6 +508,160 @@
       (setq meter (read)))
     meter ))
   
+;;
+;; --------------------------
+;;   merge-all-ties-and-rests
+;; --------------------------
+;;
+
+;; merge all tied notes and rests into one
+;; note that only dr and ndr is updated
+;; seems to be the easiest strategy for correct rule application and matching etc.
+
+;main 
+(defun merge-all-ties-and-rests ()
+  (merge-all-ties)
+  (merge-all-rests)
+  (remove-all-marked-notes)
+  (rem-all 'tie) )
+
+#|
+(defun merge-all-ties ()
+  (each-note-if
+    (this 'tie)
+    (or (first?) (not (prev 'tie)))
+    (then
+      (set-this :merged t)
+      (rem-this 'tie)
+      (let ((iend (i?last-tied-note *i*)))
+        (print-ll "merge-all-ties: note index " *i* " last note index " iend " note " (this 'n))
+        (loop for i from (1+ *i*) to iend do
+             (add-this 'ndr (iget i 'ndr))
+             (add-this 'dr (iget i 'dr))
+             (iset i :remove t)
+             )))))
+
+; add also note values (not working for dots and tuples)
+(defun merge-all-ties ()
+  (each-note-if
+    (this 'tie)
+    (or (first?) (not (prev 'tie)))
+    (then
+      (set-this :merged t)
+      (rem-this 'tie)
+      (let ((iend (i?last-tied-note *i*)))
+        (print-ll "merge-all-ties: note index " *i* " last note index " iend " note " (this 'n))
+        (loop for i from (1+ *i*) to iend do
+             (add-this 'ndr (iget i 'ndr))
+             (add-this 'dr (iget i 'dr))
+             (set-this 'n (list (car (this 'n)) (+ (cadr (this 'n)) (cadr (iget i 'n)))))
+             (iset i :remove t)
+             )))))
+|#
+
+;change to notevalue fractions
+(defun merge-all-ties ()
+  (each-note-if
+    (this 'tie)
+    (or (first?) (not (prev 'tie)))
+    (then
+      (set-this :merged t)
+      (rem-this 'tie)
+      (let ((iend (i?last-tied-note *i*)))
+        (print-ll "merge-all-ties: note index " *i* " last note index " iend " note " (this 'n))
+        (loop for i from (1+ *i*) to iend do
+             (add-this 'ndr (iget i 'ndr))
+             (add-this 'dr (iget i 'dr))
+             (set-this 'n (list (car (this 'n)) (+ (get-note-value-fraction *i*) (get-note-value-fraction i))))
+             (if (this 'dot) (rem-this 'dot))
+             (if (this 't) (rem-this 't))
+             (if (this 'tuple) (rem-this 'tuple))
+             (iset i :remove t)
+             )))))
+            
+#|
+(defun merge-all-rests ()
+  (each-note-if ; only for the first rest in a series
+    (this 'rest)
+    (or (first?) (not (prev 'rest)))
+    (then
+      (let ((iend (i?last-rest *i*)))
+        (when (> iend *i*)
+          (print-ll "merge-all-rests: note index " *i* " last note index " iend " note " (this 'n))
+          (set-this :merged t)
+          (loop for i from (1+ *i*) to iend do
+                (add-this 'ndr (iget i 'ndr))
+                (add-this 'dr (iget i 'dr))
+                (iset i :remove t)
+                ))))))
+
+(defun merge-all-rests ()
+  (each-note-if ; only for the first rest in a series
+    (this 'rest)
+    (or (first?) (not (prev 'rest)))
+    (then
+      (let ((iend (i?last-rest *i*)))
+        (when (> iend *i*)
+          (print-ll "merge-all-rests: note index " *i* " last note index " iend " note " (this 'n))
+          (set-this :merged t)
+          (loop for i from (1+ *i*) to iend do
+                (add-this 'ndr (iget i 'ndr))
+                (add-this 'dr (iget i 'dr))
+                (set-this 'n (list (car (this 'n)) (+ (cadr (this 'n)) (cadr (iget i 'n)))))
+                (iset i :remove t)
+                ))))))
+|#
+
+(defun merge-all-rests ()
+  (each-note-if ; only for the first rest in a series
+    (this 'rest)
+    (or (first?) (not (prev 'rest)))
+    (then
+      (let ((iend (i?last-rest *i*)))
+        (when (> iend *i*)
+          (print-ll "merge-all-rests: note index " *i* " last note index " iend " note " (this 'n))
+          (set-this :merged t)
+          (loop for i from (1+ *i*) to iend do
+                (add-this 'ndr (iget i 'ndr))
+                (add-this 'dr (iget i 'dr))
+                (set-this 'n (list (car (this 'n)) (+ (get-note-value-fraction *i*) (get-note-value-fraction i))))
+                (if (this 'dot) (rem-this 'dot))
+                (if (this 't) (rem-this 't))
+                (if (this 'tuple) (rem-this 'tuple))
+                (iset i :remove t)
+                ))))))
+             
+
+(defun remove-all-marked-notes ()
+  (each-note-if
+    (this :remove)
+    (then
+      (remove-this-segment)
+      )))
+
+;get index of last tied note
+;only works when starting from the first tied note
+;access function - to be called within a rulemacro
+(defun i?last-tied-note (i)
+  (untilexit end
+    (incf i)
+    (cond ((>= i (1- (length *v*)))
+           (return-from end i))
+          ((not (iget i 'tie))
+           (return-from end i)
+           ))))
+
+;get index of last rest
+;access function - to be called within a rulemacro
+(defun i?last-rest (i)
+  (untilexit end
+    (incf i)
+    (cond ((> i (1- (length *v*)))
+           (return-from end (1- i)))
+          ((not (iget i 'rest))
+           (return-from end (1- i))
+           ))))
+
  
 ;; ------------------------------------------------------------------
 ;; -----   C O N V E R S I O N S     --------------------------------
@@ -702,9 +910,16 @@
 ;;   NOTE-TO-NOTEVALUE
 ;; --------------------- 
 ;;
+;only works for old format
 (defun note-to-notevalue (note)
    (cdr note) )
 
+;220622 old and new format, returns fraction (eg 1/8)
+(defun note-to-notevalue-fraction (note)
+  (if (listp (cdr note))
+      (cadr note)
+      (/ 1 (cdr note))
+    ))
 ;
 ;; ---------------------
 ;;   midiNOTEvalue-TO-NOTEVALUE

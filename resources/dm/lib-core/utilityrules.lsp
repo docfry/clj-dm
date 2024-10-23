@@ -204,6 +204,7 @@
 ;; ---------------------
 ;;
 
+;bar and meter need to be marked on first note of each track
 (defun mark-offbeat ()
   (let ((beat-value 4) ack-value)
     (each-note             ;mark beat
@@ -697,6 +698,10 @@
 (defun scale-sound-level (db) 
    (each-note-if (not (this 'rest)) (then (add-this 'sl db))))
 
+;factor=1 -> no change
+(defun scale-sound-level-range (factor) 
+   (each-note-if (this 'sl) (set-this 'sl (* (this 'sl) factor))))
+
 
 
 ;---------- normalize --------------------------------------
@@ -735,6 +740,27 @@
          (then
           (set-this 'sl (- (this 'sl) addval))
           ))))))
+
+;211022 new version excluding tied notes
+;220620 changed to a new name, did not work with the metrical accents since they add SL on tied notes that also can be useful
+(defun normalize-sl-no-ties ()
+  (each-track
+    (let ((sltot 0.0)
+          (nsltot 0.0)
+          (nr 0) )
+      (each-note                                ;compute sltot
+        (when (and (not (this 'rest)) 
+                   (or (first?) (not (prev 'tie))))
+          (incf sltot (this 'sl))
+          (if (this 'nsl) (incf nsltot (this 'nsl)))
+          (incf nr) ))
+      (let ((addval (- (/ sltot nr)(/ nsltot nr))))
+        (each-note-if
+          (not (this 'rest))
+          (or (first?) (not (prev 'tie)))
+          (then
+            (set-this 'sl (- (this 'sl) addval))
+            ))))))
 
 ;maximize the sl corresponding to velocity 127
 (defun maximize-sl ()
@@ -986,10 +1012,18 @@
       (each-note
        (set-this :onset (/ drsum 1000.0))
        (set-this :offset (/ (+ drsum (if (this 'dro) (- (this 'dr) (this 'dro)) (this 'dr))) 1000.0))
-        (setq drsum (+ drsum (this 'dr)))
+       (setq drsum (+ drsum (this 'dr)))
        ))))
 
-
+;with NDR for onsets and no articulation
+(defun mark-nom-onset-offset-time ()
+  (each-track
+    (let ((drsum 0))
+      (each-note
+       (set-this :nonset (/ drsum 1000.0))
+       (set-this :noffset (/ (+ drsum (this 'ndr)) 1000.0))
+        (setq drsum (+ drsum (this 'ndr)))
+       ))))
 ;--notes per second----
 
 ;;from first sounding note to last not including last
