@@ -117,7 +117,7 @@
 
 
 ;241016 allow negative k values (quant) by inverting the relative lengthening thus not the same amount millisec
-; works ok
+; works rather ok, it is not the same amount for negative k values and last note is not affected
 (defun final-ritard (quant &key (q 3) length)
   (print-ll "final-ritard: q = " q)
   (let ((negative? nil))
