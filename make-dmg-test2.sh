@@ -1,7 +1,7 @@
 VERSION=3.1.6
 echo "Creating DMG for version $VERSION"
 
-JAR="director-musices-3.1.6.alpha2-standalone-openjdk17.jar"
+JAR="director-musices-3.1.6.alpha4-standalone-openjdk22.jar"
 
 jpackage --input target/ \
   --name DirectorMusices \
