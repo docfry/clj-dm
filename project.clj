@@ -1,5 +1,5 @@
 (defproject 
-  director-musices "3.1.6.alpha"
+  director-musices "3.1.7.alpha"
   :description "FIXME: write description"
   ;:manifest ["SplashScreen-Image" "splash.gif"] ;did not work for uberjar
   :dependencies [[org.clojure/clojure "1.12.0"] ;[org.clojure/clojure "1.10.1"];[org.clojure/clojure "1.5.0"]
