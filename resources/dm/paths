@@ -35,3 +35,4 @@ dm:rules
  accent-analysis
  accent-rule-ebrp
  dynamic-accent-model
+ dynamic-accent-model-svr
