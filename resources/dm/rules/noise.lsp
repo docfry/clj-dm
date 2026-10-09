@@ -1,6 +1,7 @@
 ;;Random variations in IOI and sound level
 ;;Models variations found in the litterature from the internal 'clock' and from motor control.
 ;;Developed by Friberg, Bresin and Juslin starting in 1999
+;;201126/af Added internal sync included for the noise rule
 
 
 (in-package :dm)
@@ -10,6 +11,7 @@
 ;;toplevel function
 ;;----------------
 
+#|
 (defun noise (quant &key (amp 1)(dur 1))
   (when (not (zerop (* dur quant)))
     (internal-clock-noise (* dur quant))
@@ -18,11 +20,28 @@
     (motor-noise-amp (* amp quant)) )
   (when (not (get-dm-var 'rule-debug-info)) (rem-all 'ddr)(rem-all 'dddr))
   )
+  |#
 
+;new version that will just synchronize internal clock and not motor noise when used with no sync
+;201126/af
+(defun noise (quant &key (amp 1)(dur 1))
+  (when (not (zerop (* dur quant)))
+    (internal-clock-noise-sync (* dur quant))
+    (motor-noise (* dur quant)) )
+  (when (not (zerop (* amp quant)))
+    (motor-noise-amp (* amp quant)) )
+  (when (not (get-dm-var 'rule-debug-info)) (rem-all 'ddr)(rem-all 'dddr))
+  )
 
 ;;----------------
 ;;internal clock
 ;;----------------
+
+;with internal synchronization 201126/af 
+(defun internal-clock-noise-sync (quant &key (sync-type 'simple-mel-sync))
+  (let ((rulelist (list (list 'internal-clock-noise quant))))
+    (rule-apply-list-sync rulelist sync-type) ))
+
 
 (defun internal-clock-noise (quant)
    (let (ms-range)
@@ -88,7 +107,7 @@
 ;; motor noise
 ;;----------------
            
-;;changed to onset position deviations
+;;changed to onset position deviations        
 ;;generates sort of high pass spectrum
 ;;range modeled so that rms of clock noise divided by rms motor noise = 0.57
 ;;found in Gilden et al for IOI=300
